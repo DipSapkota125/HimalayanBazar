@@ -1,0 +1,454 @@
+export const deleteProduct = async (req, res) => {
+  try {
+    const productID = req.params.id;
+
+    const product = await Product.findOneAndDelete({ _id: productID });
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found!",
+      });
+    }
+
+    const existingImageUrl = product.productImg.url;
+    if (existingImageUrl) {
+      const filename = path.basename(existingImageUrl);
+      const previousImagePath = path.join("public", "gallery", filename);
+      fs.unlinkSync(previousImagePath);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Product deleted successfully!",
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+refreshtoken integrate in auth
+export const isAuthenticated = async (req, res, next) => {
+  try {
+    const accessToken = req?.headers?.authorization?.replace("Bearer ", "");
+    if (!accessToken) {
+      return res.status(401).json({
+        success: false,
+        message: "Please log in first!",
+      });
+    }
+
+    try {
+      const decodedData = jwt.verify(accessToken, process.env.JWT_SECRET);
+      const user = await User.findById(decodedData.id);
+      if (!user) {
+        return res.status(400).json({
+          success: false,
+          message: "User doesn't exist!",
+        });
+      }
+
+      req.user = user;
+      next();
+    } catch (error) {
+      if (error.name === "TokenExpiredError") {
+        // Access token has expired, try to refresh it using the refresh token
+
+        const refreshToken = req?.headers?.refreshtoken;
+        if (!refreshToken) {
+          return res.status(401).json({
+            success: false,
+            message: "Refresh token is missing!",
+          });
+        }
+
+        try {
+          const decodedRefreshToken = jwt.verify(
+            refreshToken,
+            process.env.REFRESH_SECRET
+          );
+          const user = await User.findById(decodedRefreshToken.id);
+          if (!user) {
+            return res.status(400).json({
+              success: false,
+              message: "User doesn't exist!",
+            });
+          }
+
+          if (user.refreshToken !== refreshToken) {
+            return res.status(401).json({
+              success: false,
+              message: "Invalid refresh token!",
+            });
+          }
+
+          // Refresh the access token
+          const newAccessToken = user.getJwtToken();
+
+          // Pass the new access token in the response headers
+          res.setHeader("Authorization", `Bearer ${newAccessToken}`);
+
+          req.user = user;
+          next();
+        } catch (error) {
+          return res.status(401).json({
+            success: false,
+            message: "Invalid refresh token!",
+          });
+        }
+      } else {
+        return res.status(401).json({
+          success: false,
+          message: "Invalid access token!",
+        });
+      }
+    }
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+
+//forget password
+export const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res
+        .status(400)
+        .json({ success: false, message: "field must be filled!" });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "user not found!",
+      });
+    }
+
+    // Get ResetPassword Token
+    const resetToken = user.getResetPasswordToken();
+    await user.save({ validateBeforeSave: false });
+
+    const resetPasswordUrl = `${req.protocol}://${req.hostname}/password/reset/${resetToken}`;
+    const message = `Your password reset token is temp:-\n\n${resetPasswordUrl} \n\n if you have not requested this email then, please ignore it`;
+
+    await sendEmail({
+      email: user.email,
+      subject: `HamroDokan password Recovery`,
+      message,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Email sent to ${user.email} successfully`,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+userSchema.methods.getJwtToken = function () {
+  const accessToken = jwt.sign({ id: this._id }, process.env.JWT_SECRET, {
+    expiresIn: "2h",
+  });
+
+  const refreshToken = jwt.sign({ id: this._id }, process.env.REFRESH_SECRET, {
+    expiresIn: "7d",
+  });
+
+  this.refreshToken = refreshToken;
+
+  return accessToken;
+};
+
+//generating password for reset token
+userSchema.methods.getResetPasswordToken = function () {
+  const resetToken = crypto.randomBytes(20).toString("hex");
+
+  this.resetPasswordToken = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+  this.resetPasswordExpire = Date.now() + 15 * 60 * 1000;
+  return resetToken;
+};
+
+//update profile
+
+export const updateProfile = async (req, res) => {
+  try {
+    let user = await User.findById(req.user.id);
+    if (!user) {
+      if (req.file) {
+        await unlink(req.file.path);
+      }
+      return res.status(404).json({
+        success: false,
+        message: "product not found!",
+      });
+    }
+    const { fullName } = req.body;
+    if (!fullName) {
+      if (req.file) {
+        await unlink(req.file.path);
+      }
+      return res.status(400).json({
+        success: false,
+        message: "please provide required fields!",
+      });
+    }
+
+    const existingImageUrl = user.avatar.url;
+    const baseUrl = `${req.protocol}://${req.hostname}:${
+      process.env.PORT || 4000
+    }`;
+    const avatarPath = req.file.filename;
+    let userImageUrl;
+
+    if (existingImageUrl) {
+      const filename = path.basename(existingImageUrl);
+      const previousAvatarPath = path.join("public", "gallery", filename);
+      fs.unlinkSync(previousAvatarPath);
+    }
+
+    if (avatarPath) {
+      userImageUrl = join(baseUrl, "gallery", avatarPath).replace(/\\/g, "/");
+    }
+
+    user.fullName = fullName;
+    user.avatar = userImageUrl ? { url: userImageUrl } : undefined;
+
+    await user.save();
+    res.status(200).json({
+      success: true,
+      message: "profile update success!",
+      user,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+export const login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide required fields!",
+      });
+    }
+
+    if (!/\S+@\S+\.\S+/.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Email must be valid!",
+      });
+    }
+
+    const user = await User.findOne({ email }).select("+password");
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Email does not exist!",
+      });
+    }
+
+    const isMatched = await user.comparePassword(password);
+    if (!isMatched) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials!",
+      });
+    }
+
+    const accessToken = user.getJwtToken();
+    const refreshToken = user.refreshToken;
+
+    res.status(200).json({
+      success: true,
+      message: "Login successful!",
+      user,
+      accessToken,
+      refreshToken,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+export const changePassword = async (req, res) => {
+  try {
+    const { oldPassword, newPassword, confirmPassword } = req.body;
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "field must be filled!",
+      });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "password must be match!",
+      });
+    }
+
+    const user = await User.findById(req.user.id).select("+password");
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "user not found!",
+      });
+    }
+
+    const isMatched = await user.comparePassword(oldPassword);
+    if (!isMatched) {
+      return res.status(400).json({
+        success: false,
+        message: "oldPassword is incorrect!",
+      });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "password change successFully!",
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+all custom Error all name
+export const errorListening = (err, req, res, next) => {
+  err.statusCode = err.statusCode || 500;
+  err.message = err.message || "Internal server error!";
+
+  // Wrong MongoDB ID error (CastError)
+  if (err.name === "CastError") {
+    const message = `Resource not found: ${err.path}`;
+    err = new ErrorHandler(message, 400);
+  }
+
+  // Duplicate key error (MongoError code 11000)
+  if (err.code === 11000) {
+    const message = `Duplicate: ${Object.keys(err.keyValue)} entered`;
+    err = new ErrorHandler(message, 400);
+  }
+
+  // JSON Web Token (JWT) error (JsonWebTokenError)
+  if (err.name === "JsonWebTokenError") {
+    const message = `Invalid token, please try again`;
+    err = new ErrorHandler(message, 400);
+  }
+
+  // Token expiration error (TokenExpiredError)
+  if (err.name === "TokenExpiredError") {
+    const message = `Token has expired`;
+    err = new ErrorHandler(message, 400);
+  }
+
+  // Custom error case: File upload error (MulterError)
+  if (err.name === "MulterError") {
+    const message = `Error uploading file: ${err.message}`;
+    err = new ErrorHandler(message, 400);
+  }
+
+  // Custom error case: Database connection error (MongoNetworkError)
+  if (err.name === "MongoNetworkError") {
+    const message = `Database connection error: ${err.message}`;
+    err = new ErrorHandler(message, 500);
+  }
+
+  // Custom error case: Network error (ENOTFOUND)
+  if (err.code === "ENOTFOUND") {
+    const message = `Network error: Unable to connect to the server`;
+    err = new ErrorHandler(message, 500);
+  }
+
+  // Default error case
+  res.status(err.statusCode).json({
+    success: false,
+    message: err.message,
+  });
+};
+
+
+carousel in reactjs
+import React, { useState, useEffect } from 'react';
+import 'tailwindcss/tailwind.css';
+
+const Carousel = () => {
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const carouselItems = [
+    { color: 'bg-red-500', content: 'First carousel item' },
+    { color: 'bg-green-500', content: 'Second carousel item' },
+    { color: 'bg-blue-500', content: 'Third carousel item' },
+    // Add more carousel items as needed
+  ];
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentIndex((prevIndex) =>
+        prevIndex === carouselItems.length - 1 ? 0 : prevIndex + 1
+      );
+    }, 3000); // Change the interval duration as per your preference
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [carouselItems.length]);
+
+  return (
+    <div className="overflow-hidden w-full">
+      <div
+        className="flex transition-transform duration-500"
+        style={{ transform: `translateX(-${currentIndex * 1519}px)` }}
+      >
+        {carouselItems.map((item, index) => (
+          <div
+            key={index}
+            className={`w-1519 h-316.45 ${item.color} flex-shrink-0`}
+          >
+            {item.content}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+function App() {
+  return (
+    <div className="flex justify-center items-center h-screen">
+      <Carousel />
+    </div>
+  );
+}
+
+export default App;
